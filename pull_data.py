@@ -27,7 +27,7 @@ def main():
                 repo_id=REPO,
                 repo_type="dataset",
                 filename=path,
-                local_dir=config.RAW_DATA_DIR,
+                local_dir=config.RAW_DIR,
             )
 
         if test_mode:
