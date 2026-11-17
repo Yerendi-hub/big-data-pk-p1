@@ -1,12 +1,11 @@
 import os
+import sys
 
 import matplotlib
 matplotlib.use("Agg")   # render to files only, no window
 import matplotlib.pyplot as plt
 from matplotlib.ticker import PercentFormatter
-from pymongo import MongoClient
-
-import config
+from databases import atlas_db, local_db
 
 CHARTS_DIR = "charts"
 
@@ -116,7 +115,9 @@ def chart_speed_length(db):
 
 def main():
     os.makedirs(CHARTS_DIR, exist_ok=True)
-    db = MongoClient(config.MONGO_URI_LOCAL)[config.DB_NAME]
+    source = "atlas" if "atlas" in sys.argv else "local"   # python charts.py atlas
+    db = atlas_db() if source == "atlas" else local_db()
+    print("reading results from:", source)
 
     chart_elo_results(db)
     chart_opening_results(db)

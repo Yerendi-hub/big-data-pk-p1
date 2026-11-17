@@ -3,9 +3,9 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from pymongo import MongoClient
-
 import config
+import hadoop
+from databases import all_dbs
 
 MR_DIR = "map_reducer"
 
@@ -31,7 +31,7 @@ ANALYSES = [
 ]
 
 
-def run_locally(mapper, reducer):
+def run_locally(name, mapper, reducer):
     """Runs the pipeline: cat | mapper | sort | reducer. Returns reducer output."""
     command = (
         "set -o pipefail; "
@@ -43,6 +43,23 @@ def run_locally(mapper, reducer):
     completed = subprocess.run(command, shell=True, executable="/bin/bash",
                                capture_output=True, text=True, check=True)
     return completed.stdout
+
+
+def run_on_hadoop(name, mapper, reducer):
+    """Runs the same mapper and reducer with Hadoop Streaming on data in HDFS."""
+    output_dir = f"{hadoop.HDFS_OUTPUT}/{name}"
+    hadoop.run(f"hdfs dfs -rm -r -f {output_dir}")   # Hadoop refuses to overwrite output
+
+    hadoop.run(
+        "mapred streaming"
+        f" -files /map_reducer/{mapper},/map_reducer/{reducer}"
+        " -cmdenv PYTHONIOENCODING=utf-8"
+        f" -mapper 'python3 {mapper}'"
+        f" -reducer 'python3 {reducer}'"
+        f" -input {hadoop.HDFS_INPUT}"
+        f" -output {output_dir}"
+    )
+    return hadoop.run(f"hdfs dfs -cat {output_dir}/part-*")
 
 
 def to_number(value):
@@ -63,34 +80,44 @@ def parse_output(text, columns):
     return rows
 
 
-def main():
-    selected = sys.argv[1:]   # e.g. python run_analyses.py elo_results
+def compare_with_previous(db, name, engine, rows):
+    """If the previous result came from the other engine, checks that rows are identical."""
+    previous = db.results.find_one({"_id": name})
+    if previous and previous["engine"] != engine:
+        same = previous["rows"] == rows
+        print(f"    identical to the previous {previous['engine']} result: {same}")
 
-    client = MongoClient(config.MONGO_URI_LOCAL)
-    db = client[config.DB_NAME]
+
+def main():
+    engine = "hadoop" if "hadoop" in sys.argv else "local"
+    selected = [arg for arg in sys.argv[1:] if arg != "hadoop"]   # e.g. python run_analyses.py hadoop elo_results
+    run = run_on_hadoop if engine == "hadoop" else run_locally
+    dbs = all_dbs()
 
     for analysis in ANALYSES:
-        if selected and analysis["name"] not in selected:
+        name = analysis["name"]
+        if selected and name not in selected:
             continue
 
-        print("running:", analysis["name"])
+        print(f"running: {name} ({engine})")
         start = time.time()
-        output = run_locally(analysis["mapper"], analysis["reducer"])
+        output = run(name, analysis["mapper"], analysis["reducer"])
         rows = parse_output(output, analysis["columns"])
         seconds = round(time.time() - start, 1)
+        run_at = datetime.now(timezone.utc)
 
-        db.results.replace_one(
-            {"_id": analysis["name"]},
-            {
-                "_id": analysis["name"],
-                "engine": "local",
-                "run_at": datetime.now(timezone.utc),
-                "duration_s": seconds,
-                "rows": rows,
-            },
-            upsert=True,
-        )
-        print(f"    {len(rows)} rows, {seconds} s")
+        compare_with_previous(dbs["local"], name, engine, rows)
+
+        result = {"_id": name, "engine": engine, "run_at": run_at,
+                  "duration_s": seconds, "rows": rows}
+        run_info = {"_id": f"{name}_{engine}", "analysis": name, "engine": engine,
+                    "run_at": run_at, "duration_s": seconds, "rows_count": len(rows)}
+
+        for db in dbs.values():
+            db.results.replace_one({"_id": result["_id"]}, result, upsert=True)
+            db.runs.replace_one({"_id": run_info["_id"]}, run_info, upsert=True)
+
+        print(f"    {len(rows)} rows, {seconds} s, saved to: {', '.join(dbs)}")
 
 
 if __name__ == "__main__":

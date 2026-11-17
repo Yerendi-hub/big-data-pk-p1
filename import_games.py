@@ -3,9 +3,10 @@ import os
 import sys
 from datetime import datetime, timezone
 
-from pymongo import MongoClient, ReplaceOne
+from pymongo import ReplaceOne
 
 import config
+from databases import all_dbs
 
 BATCH_SIZE = 10_000
 EXPECTED_FIELDS = 14
@@ -72,11 +73,23 @@ def import_file(db, tsv_path):
     print(f" imported {imported:,}, skipped {skipped:,}")
 
 
+def sync_import_log(dbs):
+    """Copies the import log from the local database to the other databases (Atlas)."""
+    logs = list(dbs["local"].imports.find())
+    if not logs:
+        return
+    operations = [ReplaceOne({"_id": log["_id"]}, log, upsert=True) for log in logs]
+    for name, db in dbs.items():
+        if name != "local":
+            db.imports.bulk_write(operations, ordered=False)
+            print(f"  import log synced to {name}: {len(logs)} entries")
+
+
 def main():
     force = "force" in sys.argv
 
-    client = MongoClient(config.MONGO_URI_LOCAL)
-    db = client[config.DB_NAME]
+    dbs = all_dbs()
+    db = dbs["local"]   # games are stored only locally (Atlas M0 limit: 512 MB)
 
     for tsv_path in sorted(glob.glob(f"{config.TSV_DIR}/*.tsv")):
         source_file = os.path.basename(tsv_path)
@@ -88,6 +101,7 @@ def main():
         print("  importing:", source_file)
         import_file(db, tsv_path)
 
+    sync_import_log(dbs)
     print("\nGames in database:", db.games.count_documents({}))
 
 

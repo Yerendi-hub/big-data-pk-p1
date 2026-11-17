@@ -2,3 +2,5 @@
 data/
 .env
 __pycache__/
+tls/*
+!tls/generate_certs.sh
